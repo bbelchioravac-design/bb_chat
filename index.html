@@ -667,6 +667,28 @@ html, body {
           <div class="hint">Aparece no ecrã inicial.</div>
         </div>
       </div>
+      <div class="section-divider" onclick="toggleSection('supabaseSection', this)" style="margin-top:0;border-top:none;">
+        <span class="toggle-arrow collapsed">▼</span> Supabase (Sincronização)
+      </div>
+      <div class="collapsible-section collapsed" id="supabaseSection">
+        <div style="padding-top:12px">
+          <div class="form-group">
+            <label>Supabase URL</label>
+            <input type="text" id="supabaseUrlInput" placeholder="https://xxxxx.supabase.co">
+            <div class="hint">Encontras em Project Settings → API → Project URL</div>
+          </div>
+          <div class="form-group">
+            <label>Supabase Anon Key</label>
+            <div class="api-key-wrapper">
+              <input type="password" id="supabaseKeyInput" placeholder="eyJ..." autocomplete="off">
+              <button class="toggle-visibility" onclick="toggleSupabaseKeyVis()">👁</button>
+            </div>
+            <div class="hint">Encontras em Project Settings → API → anon public key</div>
+          </div>
+          <button class="save-btn" style="margin-bottom:12px;" onclick="saveSupabaseConfig()">Guardar Supabase & Reconectar</button>
+        </div>
+      </div>
+
       <div class="form-group">
         <label>Chave API OpenRouter</label>
         <div class="api-key-wrapper">
@@ -1600,6 +1622,8 @@ function openSettings() {
   closeSidebar();
   updateAvatarPreview();
   document.getElementById('apiKeyInput').value = state.apiKey;
+  document.getElementById('supabaseUrlInput').value = localStorage.getItem('bb_supabase_url') || '';
+  document.getElementById('supabaseKeyInput').value = localStorage.getItem('bb_supabase_key') || '';
   document.getElementById('systemPromptInput').value = state.systemPrompt;
   document.getElementById('userLabelInput').value = state.userLabel || 'Tu';
   document.getElementById('aiLabelInput').value = state.aiLabel || 'AL';
@@ -1692,6 +1716,23 @@ function saveSettings() {
 }
 
 function toggleApiVis() { const i = document.getElementById('apiKeyInput'); i.type = i.type === 'password' ? 'text' : 'password'; }
+function toggleSupabaseKeyVis() { const i = document.getElementById('supabaseKeyInput'); i.type = i.type === 'password' ? 'text' : 'password'; }
+
+async function saveSupabaseConfig() {
+  const url = document.getElementById('supabaseUrlInput').value.trim();
+  const key = document.getElementById('supabaseKeyInput').value.trim();
+  if (!url || !key) { showToast('Preenche URL e Key do Supabase'); return; }
+  localStorage.setItem('bb_supabase_url', url);
+  localStorage.setItem('bb_supabase_key', key);
+  // Re-init Supabase
+  try {
+    const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+    supabase = createClient(url, key);
+    showToast('Supabase configurado ✓ — Refresca a página para activar login', false);
+  } catch(e) {
+    showToast('Erro ao conectar: ' + e.message);
+  }
+}
 
 // ===== AVATAR =====
 function handleAvatarUpload(event) {
