@@ -1007,7 +1007,7 @@ async function syncToCloud() {
       user_id: currentUser.id,
       data: merged,
       updated_at: new Date().toISOString(),
-    });
+    }, { onConflict: 'user_id' });
     if (error) console.error('Sync error:', error);
 
     // Update local state with merged result (keep API key)
