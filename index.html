@@ -990,15 +990,31 @@ function queueSync() {
 async function syncToCloud() {
   if (!supabase || !currentUser) return;
   try {
-    const s = { ...state };
-    delete s.isStreaming;
-    delete s.apiKey; // NEVER sync API key
+    // First pull cloud data and merge before pushing
+    const { data: cloudRow } = await supabase.from('user_data')
+      .select('data').eq('user_id', currentUser.id).single();
+
+    const localData = { ...state };
+    delete localData.isStreaming;
+    delete localData.apiKey;
+
+    let merged = localData;
+    if (cloudRow?.data) {
+      merged = mergeStates(cloudRow.data, localData);
+    }
+
     const { error } = await supabase.from('user_data').upsert({
       user_id: currentUser.id,
-      data: s,
+      data: merged,
       updated_at: new Date().toISOString(),
     });
     if (error) console.error('Sync error:', error);
+
+    // Update local state with merged result (keep API key)
+    const localApiKey = state.apiKey;
+    state = deepMerge(state, merged);
+    state.apiKey = localApiKey;
+
   } catch(e) { console.error('Sync error:', e); }
 }
 
@@ -1008,13 +1024,56 @@ async function loadFromCloud() {
     const { data, error } = await supabase.from('user_data')
       .select('data').eq('user_id', currentUser.id).single();
     if (error || !data?.data) return false;
-    // Merge cloud data but keep local API key
+
     const localApiKey = state.apiKey;
-    state = deepMerge(state, data.data);
+    state = mergeStates(data.data, state);
     state.apiKey = localApiKey;
     await saveState();
     return true;
   } catch(e) { return false; }
+}
+
+// Smart merge: combines chats and memories from both sides
+function mergeStates(cloudState, localState) {
+  const result = deepMerge(cloudState, localState);
+
+  // Merge chats: keep all unique chats, for duplicates keep the most recent version
+  const allChats = new Map();
+  (cloudState.chats || []).forEach(c => allChats.set(c.id, c));
+  (localState.chats || []).forEach(c => {
+    const existing = allChats.get(c.id);
+    if (!existing || c.updatedAt > existing.updatedAt) {
+      allChats.set(c.id, c);
+    } else if (existing && c.updatedAt === existing.updatedAt) {
+      // Same timestamp — merge messages (keep longest)
+      if (c.messages.length > existing.messages.length) allChats.set(c.id, c);
+    }
+  });
+  result.chats = [...allChats.values()];
+
+  // Merge memories: keep all unique, for duplicates keep most recent
+  const allMems = new Map();
+  (cloudState.memories || []).forEach(m => allMems.set(m.id, m));
+  (localState.memories || []).forEach(m => {
+    const existing = allMems.get(m.id);
+    if (!existing || (m.updatedAt || 0) > (existing.updatedAt || 0)) {
+      allMems.set(m.id, m);
+    }
+  });
+  result.memories = [...allMems.values()];
+
+  // Merge custom models: union of both
+  const models = new Set([...(cloudState.customModels || []), ...(localState.customModels || [])]);
+  result.customModels = [...models].filter(m => m);
+
+  // For settings (systemPrompt, params, etc): keep the most recently changed
+  // localState wins since it's the device you're actively using
+  result.systemPrompt = localState.systemPrompt || cloudState.systemPrompt || '';
+  result.userLabel = localState.userLabel || cloudState.userLabel || 'Tu';
+  result.aiLabel = localState.aiLabel || cloudState.aiLabel || 'AL';
+  if (localState.params) result.params = localState.params;
+
+  return result;
 }
 
 // ===== AUTH =====
