@@ -1037,37 +1037,49 @@ async function loadFromCloud() {
 function mergeStates(cloudState, localState) {
   const result = deepMerge(cloudState, localState);
 
-  // Merge chats: keep all unique chats, for duplicates keep the most recent version
+  // Collect all deleted IDs from both sides
+  const deletedChatIds = new Set([
+    ...(cloudState.deletedChatIds || []),
+    ...(localState.deletedChatIds || [])
+  ]);
+  const deletedMemIds = new Set([
+    ...(cloudState.deletedMemIds || []),
+    ...(localState.deletedMemIds || [])
+  ]);
+
+  // Merge chats: keep all unique, for duplicates keep most recent, exclude deleted
   const allChats = new Map();
-  (cloudState.chats || []).forEach(c => allChats.set(c.id, c));
+  (cloudState.chats || []).forEach(c => { if (!deletedChatIds.has(c.id)) allChats.set(c.id, c); });
   (localState.chats || []).forEach(c => {
+    if (deletedChatIds.has(c.id)) return;
     const existing = allChats.get(c.id);
     if (!existing || c.updatedAt > existing.updatedAt) {
       allChats.set(c.id, c);
     } else if (existing && c.updatedAt === existing.updatedAt) {
-      // Same timestamp — merge messages (keep longest)
       if (c.messages.length > existing.messages.length) allChats.set(c.id, c);
     }
   });
   result.chats = [...allChats.values()];
+  result.deletedChatIds = [...deletedChatIds];
 
-  // Merge memories: keep all unique, for duplicates keep most recent
+  // Merge memories: keep all unique, for duplicates keep most recent, exclude deleted
   const allMems = new Map();
-  (cloudState.memories || []).forEach(m => allMems.set(m.id, m));
+  (cloudState.memories || []).forEach(m => { if (!deletedMemIds.has(m.id)) allMems.set(m.id, m); });
   (localState.memories || []).forEach(m => {
+    if (deletedMemIds.has(m.id)) return;
     const existing = allMems.get(m.id);
     if (!existing || (m.updatedAt || 0) > (existing.updatedAt || 0)) {
       allMems.set(m.id, m);
     }
   });
   result.memories = [...allMems.values()];
+  result.deletedMemIds = [...deletedMemIds];
 
   // Merge custom models: union of both
   const models = new Set([...(cloudState.customModels || []), ...(localState.customModels || [])]);
   result.customModels = [...models].filter(m => m);
 
-  // For settings (systemPrompt, params, etc): keep the most recently changed
-  // localState wins since it's the device you're actively using
+  // Settings: local device wins
   result.systemPrompt = localState.systemPrompt || cloudState.systemPrompt || '';
   result.userLabel = localState.userLabel || cloudState.userLabel || 'Tu';
   result.aiLabel = localState.aiLabel || cloudState.aiLabel || 'AL';
@@ -1229,6 +1241,9 @@ function switchChat(id) {
 function deleteChat(id) {
   if (!confirm('Apagar esta conversa?')) return;
   state.chats = state.chats.filter(c => c.id !== id);
+  // Track deleted IDs so sync doesn't bring them back
+  if (!state.deletedChatIds) state.deletedChatIds = [];
+  if (!state.deletedChatIds.includes(id)) state.deletedChatIds.push(id);
   if (state.activeChatId === id)
     state.activeChatId = state.chats.length ? state.chats[state.chats.length - 1].id : null;
   saveState(); renderChatList(); renderMessages();
@@ -1923,6 +1938,8 @@ function saveMemory() {
 function deleteMemory(id) {
   if (!confirm('Apagar esta memória?')) return;
   state.memories = state.memories.filter(m => m.id !== id);
+  if (!state.deletedMemIds) state.deletedMemIds = [];
+  if (!state.deletedMemIds.includes(id)) state.deletedMemIds.push(id);
   saveState(); renderMemoryCards(); showToast('Memória apagada', false);
 }
 
