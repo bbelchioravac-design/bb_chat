@@ -606,6 +606,7 @@ html, body {
       <span class="model-select-arrow">▼</span>
     </div>
     <div class="topbar-actions">
+      <button class="icon-btn" id="syncBtn" onclick="manualSync()" title="Sincronizar" style="display:none">🔄</button>
       <button class="icon-btn" onclick="toggleExportMenu()" title="Exportar chat">📥</button>
       <button class="icon-btn" onclick="newChat()" title="Nova conversa">✦</button>
     </div>
@@ -983,8 +984,33 @@ async function _doSave() {
 // ===== SUPABASE SYNC =====
 let syncTimeout = null;
 function queueSync() {
-  if (syncTimeout) clearTimeout(syncTimeout);
-  syncTimeout = setTimeout(() => syncToCloud(), 2000);
+  // Sync is now manual only — triggered by the sync button
+  // This prevents excessive Disk IO on Supabase free tier
+}
+
+async function manualSync() {
+  if (!supabase || !currentUser) {
+    showToast('Login necessário para sincronizar');
+    return;
+  }
+  const btn = document.getElementById('syncBtn');
+  btn.textContent = '⏳';
+  btn.disabled = true;
+  try {
+    await syncToCloud();
+    await loadFromCloud();
+    renderChatList(); renderMessages(); renderModelSelect();
+    if (state.activeChatId) syncModelDropdown();
+    btn.textContent = '✅';
+    showToast('Sincronizado ✓', false);
+    setTimeout(() => { btn.textContent = '🔄'; }, 2000);
+  } catch(e) {
+    btn.textContent = '❌';
+    showToast('Erro ao sincronizar');
+    setTimeout(() => { btn.textContent = '🔄'; }, 2000);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function syncToCloud() {
@@ -1131,6 +1157,7 @@ async function handleAuth() {
     if (result.error) throw result.error;
     currentUser = result.data.user;
     document.getElementById('logoutBtn').style.display = 'flex';
+    document.getElementById('syncBtn').style.display = 'flex';
 
     // Try loading cloud data
     await loadFromCloud();
@@ -1149,6 +1176,7 @@ async function handleLogout() {
   document.getElementById('loginScreen').classList.remove('hidden');
   document.getElementById('appContainer').classList.remove('visible');
   document.getElementById('logoutBtn').style.display = 'none';
+  document.getElementById('syncBtn').style.display = 'none';
 }
 
 function enterOfflineMode() {
@@ -2044,6 +2072,7 @@ function syncAllSliders() {
       if (session) {
         currentUser = session.user;
         document.getElementById('logoutBtn').style.display = 'flex';
+        document.getElementById('syncBtn').style.display = 'flex';
         await loadFromCloud();
         enterApp();
         return;
