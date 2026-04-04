@@ -612,7 +612,6 @@ html, body {
     </div>
   </div>
 
-  <!-- Export dropdown -->
   <div class="export-menu" id="exportMenu">
     <button class="export-menu-item" onclick="exportChatMarkdown()">📄 Exportar Markdown</button>
     <button class="export-menu-item" onclick="exportChatJSON()">📋 Exportar JSON</button>
@@ -852,10 +851,8 @@ html, body {
 
 <script>
 // ===== SUPABASE CONFIG =====
-// Users need to set these after creating a Supabase project
 const SUPABASE_URL = localStorage.getItem('bb_supabase_url') || '';
 const SUPABASE_ANON_KEY = localStorage.getItem('bb_supabase_key') || '';
-
 let supabase = null;
 let currentUser = null;
 let isOfflineMode = false;
@@ -870,34 +867,48 @@ const DEFAULT_MODELS = [
   { id: 'moonshotai/kimi-k2-thinking', name: 'Kimi K2 Thinking' },
   { id: 'meta-llama/llama-4-maverick', name: 'Llama 4 Maverick' },
 ];
-
 const PRIORITY_ORDER = { alta: 0, media: 1, baixa: 2 };
 
 // ===== STATE =====
 let state = {
   apiKey: '', systemPrompt: '', userLabel: 'Tu', aiLabel: 'AL',
   contextMessages: 8, maxMemories: 3, summarizeAfter: 0,
-  params: {
-    temperature: 0.85, top_p: 0.90, top_k: 0,
-    frequency_penalty: 0, presence_penalty: 0,
-    repetition_penalty: 1.15, min_p: 0.05, max_tokens: 0,
-  },
+  params: { temperature: 0.85, top_p: 0.90, top_k: 0, frequency_penalty: 0, presence_penalty: 0, repetition_penalty: 1.15, min_p: 0.05, max_tokens: 0 },
   welcomeAvatar: '',
   customModels: [], memories: [], chats: [],
   activeChatId: null, isStreaming: false,
 };
-
 let editingMemoryId = null;
 let abortController = null;
-let pendingImages = []; // { base64, mimeType, name }
+let pendingImages = [];
 
 // ===== TOKEN ESTIMATION =====
-function estimateTokens(text) {
-  if (!text) return 0;
-  return Math.ceil(text.length / 3.5);
-}
+function estimateTokens(text) { if (!text) return 0; return Math.ceil(text.length / 3.5); }
 function tokenLabel(count) { return count < 1000 ? count.toString() : (count / 1000).toFixed(1) + 'k'; }
 function tokenClass(count) { if (count < 4000) return 'low'; if (count < 12000) return 'medium'; return 'high'; }
+
+// ===== TEMPORAL AWARENESS =====
+function buildTemporalContext(chat) {
+  const now = new Date();
+  const weekdays = ['Domingo','Segunda-feira','Terça-feira','Quarta-feira','Quinta-feira','Sexta-feira','Sábado'];
+  const months = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const timeStr = `${weekdays[now.getDay()]}, ${now.getDate()} de ${months[now.getMonth()]} de ${now.getFullYear()}, ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+  let temporalContext = `[CONTEXTO TEMPORAL]\nData e hora actual: ${timeStr}`;
+
+  // Find last user message with timestamp
+  const lastMsg = [...chat.messages].reverse().find(m => m.role === 'user' && m.timestamp);
+  if (lastMsg?.timestamp) {
+    const diff = now - new Date(lastMsg.timestamp);
+    const mins = Math.floor(diff / 60000);
+    let agoStr;
+    if (mins < 1) agoStr = 'agora mesmo';
+    else if (mins < 60) agoStr = `há ${mins} minuto${mins > 1 ? 's' : ''}`;
+    else if (mins < 1440) { const h = Math.floor(mins / 60); agoStr = `há ${h} hora${h > 1 ? 's' : ''}`; }
+    else { const d = Math.floor(mins / 1440); agoStr = `há ${d} dia${d > 1 ? 's' : ''}`; }
+    temporalContext += `\nÚltima mensagem: ${agoStr}`;
+  }
+  return temporalContext;
+}
 
 // ===== PERSISTENCE (IndexedDB) =====
 const DB_NAME = 'bb_chat_db_v6';
@@ -907,10 +918,7 @@ const DB_STORE = 'state';
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE);
-    };
+    req.onupgradeneeded = (e) => { const db = e.target.result; if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE); };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
@@ -925,198 +933,110 @@ async function loadState() {
     const saved = await new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); });
     db.close();
     if (saved) { state = deepMerge(state, saved); return; }
-    // Migration from v5
     try {
-      const oldDb = await new Promise((res, rej) => {
-        const r = indexedDB.open('bb_chat_db', 1);
-        r.onsuccess = () => res(r.result);
-        r.onerror = () => rej(r.error);
-      });
-      const otx = oldDb.transaction('state', 'readonly');
-      const ostore = otx.objectStore('state');
-      const oreq = ostore.get('app_state');
+      const oldDb = await new Promise((res, rej) => { const r = indexedDB.open('bb_chat_db', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+      const otx = oldDb.transaction('state', 'readonly'); const ostore = otx.objectStore('state'); const oreq = ostore.get('app_state');
       const oldData = await new Promise((res, rej) => { oreq.onsuccess = () => res(oreq.result); oreq.onerror = () => rej(oreq.error); });
       oldDb.close();
-      if (oldData) {
-        state = deepMerge(state, oldData);
-        await saveState();
-        showToast('Dados migrados da v5 ✓', false);
-      }
-    } catch(e) { /* no v5 data */ }
-  } catch(e) {
-    console.error('Load error:', e);
-  }
+      if (oldData) { state = deepMerge(state, oldData); await saveState(); showToast('Dados migrados da v5 ✓', false); }
+    } catch(e) {}
+  } catch(e) { console.error('Load error:', e); }
 }
 
 function deepMerge(target, source) {
   const result = { ...target };
   for (const key of Object.keys(source)) {
-    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key]) && target[key] && typeof target[key] === 'object') {
-      result[key] = deepMerge(target[key], source[key]);
-    } else { result[key] = source[key]; }
+    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key]) && target[key] && typeof target[key] === 'object') { result[key] = deepMerge(target[key], source[key]); }
+    else { result[key] = source[key]; }
   }
   return result;
 }
 
 let saveTimeout = null;
-function saveState() {
-  if (saveTimeout) clearTimeout(saveTimeout);
-  saveTimeout = setTimeout(() => _doSave(), 300);
-  return Promise.resolve();
-}
+function saveState() { if (saveTimeout) clearTimeout(saveTimeout); saveTimeout = setTimeout(() => _doSave(), 300); return Promise.resolve(); }
 
 async function _doSave() {
   try {
     const s = { ...state }; delete s.isStreaming;
-    const db = await openDB();
-    const tx = db.transaction(DB_STORE, 'readwrite');
+    const db = await openDB(); const tx = db.transaction(DB_STORE, 'readwrite');
     tx.objectStore(DB_STORE).put(s, 'app_state');
     await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
     db.close();
-    // Queue sync to Supabase if online
     if (currentUser && !isOfflineMode) queueSync();
-  } catch(e) {
-    showToast('⚠️ Erro ao guardar!');
-    console.error('Save error:', e);
-  }
+  } catch(e) { showToast('⚠️ Erro ao guardar!'); console.error('Save error:', e); }
 }
 
 // ===== SUPABASE SYNC =====
 let syncTimeout = null;
-function queueSync() {
-  // Sync is now manual only — triggered by the sync button
-  // This prevents excessive Disk IO on Supabase free tier
-}
+function queueSync() {}
 
 async function manualSync() {
-  if (!supabase || !currentUser) {
-    showToast('Login necessário para sincronizar');
-    return;
-  }
-  const btn = document.getElementById('syncBtn');
-  btn.textContent = '⏳';
-  btn.disabled = true;
+  if (!supabase || !currentUser) { showToast('Login necessário para sincronizar'); return; }
+  const btn = document.getElementById('syncBtn'); btn.textContent = '⏳'; btn.disabled = true;
   try {
-    await syncToCloud();
-    await loadFromCloud();
+    await syncToCloud(); await loadFromCloud();
     renderChatList(); renderMessages(); renderModelSelect();
     if (state.activeChatId) syncModelDropdown();
-    btn.textContent = '✅';
-    showToast('Sincronizado ✓', false);
-    setTimeout(() => { btn.textContent = '🔄'; }, 2000);
-  } catch(e) {
-    btn.textContent = '❌';
-    showToast('Erro ao sincronizar');
-    setTimeout(() => { btn.textContent = '🔄'; }, 2000);
-  } finally {
-    btn.disabled = false;
-  }
+    btn.textContent = '✅'; showToast('Sincronizado ✓', false); setTimeout(() => { btn.textContent = '🔄'; }, 2000);
+  } catch(e) { btn.textContent = '❌'; showToast('Erro ao sincronizar'); setTimeout(() => { btn.textContent = '🔄'; }, 2000); }
+  finally { btn.disabled = false; }
 }
 
 async function syncToCloud() {
   if (!supabase || !currentUser) return;
   try {
-    // First pull cloud data and merge before pushing
-    const { data: cloudRow } = await supabase.from('user_data')
-      .select('data').eq('user_id', currentUser.id).single();
-
-    const localData = { ...state };
-    delete localData.isStreaming;
-    delete localData.apiKey;
-
+    const { data: cloudRow } = await supabase.from('user_data').select('data').eq('user_id', currentUser.id).single();
+    const localData = { ...state }; delete localData.isStreaming; delete localData.apiKey;
     let merged = localData;
-    if (cloudRow?.data) {
-      merged = mergeStates(cloudRow.data, localData);
-    }
-
-    const { error } = await supabase.from('user_data').upsert({
-      user_id: currentUser.id,
-      data: merged,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'user_id' });
+    if (cloudRow?.data) { merged = mergeStates(cloudRow.data, localData); }
+    const { error } = await supabase.from('user_data').upsert({ user_id: currentUser.id, data: merged, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
     if (error) console.error('Sync error:', error);
-
-    // Update local state with merged result (keep API key)
-    const localApiKey = state.apiKey;
-    state = deepMerge(state, merged);
-    state.apiKey = localApiKey;
-
+    const localApiKey = state.apiKey; state = deepMerge(state, merged); state.apiKey = localApiKey;
   } catch(e) { console.error('Sync error:', e); }
 }
 
 async function loadFromCloud() {
   if (!supabase || !currentUser) return false;
   try {
-    const { data, error } = await supabase.from('user_data')
-      .select('data').eq('user_id', currentUser.id).single();
+    const { data, error } = await supabase.from('user_data').select('data').eq('user_id', currentUser.id).single();
     if (error || !data?.data) return false;
-
-    const localApiKey = state.apiKey;
-    state = mergeStates(data.data, state);
-    state.apiKey = localApiKey;
-    await saveState();
-    return true;
+    const localApiKey = state.apiKey; state = mergeStates(data.data, state); state.apiKey = localApiKey;
+    await saveState(); return true;
   } catch(e) { return false; }
 }
 
-// Smart merge: combines chats and memories from both sides
 function mergeStates(cloudState, localState) {
   const result = deepMerge(cloudState, localState);
-
-  // Collect all deleted IDs from both sides
-  const deletedChatIds = new Set([
-    ...(cloudState.deletedChatIds || []),
-    ...(localState.deletedChatIds || [])
-  ]);
-  const deletedMemIds = new Set([
-    ...(cloudState.deletedMemIds || []),
-    ...(localState.deletedMemIds || [])
-  ]);
-
-  // Merge chats: keep all unique, for duplicates keep most recent, exclude deleted
+  const deletedChatIds = new Set([...(cloudState.deletedChatIds || []), ...(localState.deletedChatIds || [])]);
+  const deletedMemIds = new Set([...(cloudState.deletedMemIds || []), ...(localState.deletedMemIds || [])]);
   const allChats = new Map();
   (cloudState.chats || []).forEach(c => { if (!deletedChatIds.has(c.id)) allChats.set(c.id, c); });
   (localState.chats || []).forEach(c => {
     if (deletedChatIds.has(c.id)) return;
     const existing = allChats.get(c.id);
-    if (!existing || c.updatedAt > existing.updatedAt) {
-      allChats.set(c.id, c);
-    } else if (existing && c.updatedAt === existing.updatedAt) {
-      if (c.messages.length > existing.messages.length) allChats.set(c.id, c);
-    }
+    if (!existing || c.updatedAt > existing.updatedAt) { allChats.set(c.id, c); }
+    else if (existing && c.updatedAt === existing.updatedAt) { if (c.messages.length > existing.messages.length) allChats.set(c.id, c); }
   });
-  result.chats = [...allChats.values()];
-  result.deletedChatIds = [...deletedChatIds];
-
-  // Merge memories: keep all unique, for duplicates keep most recent, exclude deleted
+  result.chats = [...allChats.values()]; result.deletedChatIds = [...deletedChatIds];
   const allMems = new Map();
   (cloudState.memories || []).forEach(m => { if (!deletedMemIds.has(m.id)) allMems.set(m.id, m); });
   (localState.memories || []).forEach(m => {
     if (deletedMemIds.has(m.id)) return;
     const existing = allMems.get(m.id);
-    if (!existing || (m.updatedAt || 0) > (existing.updatedAt || 0)) {
-      allMems.set(m.id, m);
-    }
+    if (!existing || (m.updatedAt || 0) > (existing.updatedAt || 0)) { allMems.set(m.id, m); }
   });
-  result.memories = [...allMems.values()];
-  result.deletedMemIds = [...deletedMemIds];
-
-  // Merge custom models: union of both
+  result.memories = [...allMems.values()]; result.deletedMemIds = [...deletedMemIds];
   const models = new Set([...(cloudState.customModels || []), ...(localState.customModels || [])]);
   result.customModels = [...models].filter(m => m);
-
-  // Settings: local device wins
   result.systemPrompt = localState.systemPrompt || cloudState.systemPrompt || '';
   result.userLabel = localState.userLabel || cloudState.userLabel || 'Tu';
   result.aiLabel = localState.aiLabel || cloudState.aiLabel || 'AL';
   if (localState.params) result.params = localState.params;
-
   return result;
 }
 
 // ===== AUTH =====
 let isSignUp = false;
-
 function toggleAuthMode() {
   isSignUp = !isSignUp;
   document.getElementById('loginBtn').textContent = isSignUp ? 'Criar Conta' : 'Entrar';
@@ -1127,71 +1047,38 @@ function toggleAuthMode() {
 async function handleAuth() {
   const email = document.getElementById('loginEmail').value.trim();
   const pass = document.getElementById('loginPassword').value;
-  const errEl = document.getElementById('loginError');
-  const btn = document.getElementById('loginBtn');
-
+  const errEl = document.getElementById('loginError'); const btn = document.getElementById('loginBtn');
   if (!email || !pass) { errEl.textContent = 'Preenche email e password'; return; }
-
-  // Check if Supabase is configured
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-    errEl.textContent = 'Supabase não configurado. Usa modo offline ou configura nas definições.';
-    return;
-  }
-
-  btn.disabled = true;
-  errEl.textContent = '';
-
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) { errEl.textContent = 'Supabase não configurado. Usa modo offline ou configura nas definições.'; return; }
+  btn.disabled = true; errEl.textContent = '';
   try {
-    if (!supabase) {
-      const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
-      supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    }
-
+    if (!supabase) { const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'); supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY); }
     let result;
-    if (isSignUp) {
-      result = await supabase.auth.signUp({ email, password: pass });
-    } else {
-      result = await supabase.auth.signInWithPassword({ email, password: pass });
-    }
-
+    if (isSignUp) { result = await supabase.auth.signUp({ email, password: pass }); }
+    else { result = await supabase.auth.signInWithPassword({ email, password: pass }); }
     if (result.error) throw result.error;
     currentUser = result.data.user;
     document.getElementById('logoutBtn').style.display = 'flex';
     document.getElementById('syncBtn').style.display = 'flex';
-
-    // Try loading cloud data
-    await loadFromCloud();
-    enterApp();
-  } catch(e) {
-    errEl.textContent = e.message || 'Erro de autenticação';
-  } finally {
-    btn.disabled = false;
-  }
+    await loadFromCloud(); enterApp();
+  } catch(e) { errEl.textContent = e.message || 'Erro de autenticação'; }
+  finally { btn.disabled = false; }
 }
 
 async function handleLogout() {
   if (supabase) await supabase.auth.signOut();
-  currentUser = null;
-  isOfflineMode = false;
+  currentUser = null; isOfflineMode = false;
   document.getElementById('loginScreen').classList.remove('hidden');
   document.getElementById('appContainer').classList.remove('visible');
   document.getElementById('logoutBtn').style.display = 'none';
   document.getElementById('syncBtn').style.display = 'none';
 }
 
-function enterOfflineMode() {
-  isOfflineMode = true;
-  currentUser = null;
-  enterApp();
-}
+function enterOfflineMode() { isOfflineMode = true; currentUser = null; enterApp(); }
 
 async function enterApp() {
-  await loadState();
-  renderModelSelect(); renderChatList();
-  if (state.activeChatId) {
-    renderMessages();
-    syncModelDropdown();
-  }
+  await loadState(); renderModelSelect(); renderChatList();
+  if (state.activeChatId) { renderMessages(); syncModelDropdown(); }
   syncAllSliders();
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('appContainer').classList.add('visible');
@@ -1199,36 +1086,17 @@ async function enterApp() {
 }
 
 // ===== MODELS =====
-function getAllModels() {
-  return [...DEFAULT_MODELS, ...state.customModels.filter(m => m).map(m => ({ id: m, name: m.split('/').pop() }))];
-}
+function getAllModels() { return [...DEFAULT_MODELS, ...state.customModels.filter(m => m).map(m => ({ id: m, name: m.split('/').pop() }))]; }
 
 function renderModelSelect() {
-  const sel = document.getElementById('modelSelect');
-  const cur = sel.value; sel.innerHTML = '';
-  getAllModels().forEach(m => {
-    const o = document.createElement('option'); o.value = m.id; o.textContent = m.name; sel.appendChild(o);
-  });
+  const sel = document.getElementById('modelSelect'); const cur = sel.value; sel.innerHTML = '';
+  getAllModels().forEach(m => { const o = document.createElement('option'); o.value = m.id; o.textContent = m.name; sel.appendChild(o); });
   if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
 
-function onModelChange() {
-  const chat = getActiveChat();
-  if (chat) {
-    chat.model = document.getElementById('modelSelect').value;
-    chat.updatedAt = Date.now();
-    saveState();
-  }
-}
+function onModelChange() { const chat = getActiveChat(); if (chat) { chat.model = document.getElementById('modelSelect').value; chat.updatedAt = Date.now(); saveState(); } }
 
-function syncModelDropdown() {
-  const chat = getActiveChat();
-  if (!chat?.model) return;
-  const sel = document.getElementById('modelSelect');
-  if ([...sel.options].some(o => o.value === chat.model)) {
-    sel.value = chat.model;
-  }
-}
+function syncModelDropdown() { const chat = getActiveChat(); if (!chat?.model) return; const sel = document.getElementById('modelSelect'); if ([...sel.options].some(o => o.value === chat.model)) { sel.value = chat.model; } }
 
 // ===== CHAT LIST =====
 function renderChatList() {
@@ -1238,42 +1106,31 @@ function renderChatList() {
     div.className = 'chat-item' + (chat.id === state.activeChatId ? ' active' : '');
     const title = chat.title || chat.messages.find(m => m.role === 'user')?.content?.slice(0, 50) || 'Nova conversa';
     const d = new Date(chat.updatedAt);
-    div.innerHTML = `
-      <span class="chat-item-text">${escapeHtml(title)}</span>
-      <span class="chat-item-date">${d.toLocaleDateString('pt-PT',{day:'2-digit',month:'2-digit'})}</span>
-      <button class="chat-delete" onclick="event.stopPropagation();deleteChat('${chat.id}')">✕</button>`;
+    div.innerHTML = `<span class="chat-item-text">${escapeHtml(title)}</span><span class="chat-item-date">${d.toLocaleDateString('pt-PT',{day:'2-digit',month:'2-digit'})}</span><button class="chat-delete" onclick="event.stopPropagation();deleteChat('${chat.id}')">✕</button>`;
     div.onclick = () => { switchChat(chat.id); closeSidebar(); };
     list.appendChild(div);
   });
 }
 
 function newChat() {
-  const chat = { id: 'chat_' + Date.now(), title: '', messages: [], summary: '',
-    model: document.getElementById('modelSelect').value,
-    createdAt: Date.now(), updatedAt: Date.now() };
+  const chat = { id: 'chat_' + Date.now(), title: '', messages: [], summary: '', model: document.getElementById('modelSelect').value, createdAt: Date.now(), updatedAt: Date.now() };
   state.chats.push(chat); state.activeChatId = chat.id;
-  pendingImages = [];
-  document.getElementById('imagePreviewRow').innerHTML = '';
+  pendingImages = []; document.getElementById('imagePreviewRow').innerHTML = '';
   saveState(); renderChatList(); renderMessages(); closeSidebar();
   document.getElementById('inputField').focus();
 }
 
 function switchChat(id) {
-  state.activeChatId = id;
-  pendingImages = [];
-  document.getElementById('imagePreviewRow').innerHTML = '';
-  syncModelDropdown();
-  saveState(); renderChatList(); renderMessages();
+  state.activeChatId = id; pendingImages = []; document.getElementById('imagePreviewRow').innerHTML = '';
+  syncModelDropdown(); saveState(); renderChatList(); renderMessages();
 }
 
 function deleteChat(id) {
   if (!confirm('Apagar esta conversa?')) return;
   state.chats = state.chats.filter(c => c.id !== id);
-  // Track deleted IDs so sync doesn't bring them back
   if (!state.deletedChatIds) state.deletedChatIds = [];
   if (!state.deletedChatIds.includes(id)) state.deletedChatIds.push(id);
-  if (state.activeChatId === id)
-    state.activeChatId = state.chats.length ? state.chats[state.chats.length - 1].id : null;
+  if (state.activeChatId === id) state.activeChatId = state.chats.length ? state.chats[state.chats.length - 1].id : null;
   saveState(); renderChatList(); renderMessages();
   if (state.activeChatId) syncModelDropdown();
 }
@@ -1285,14 +1142,12 @@ function getRelevantMemories(userMessage) {
   const norm = t => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const msgNorm = norm(userMessage);
   const pinned = [], matched = [];
-
   state.memories.forEach(mem => {
     if (mem.pinned) { pinned.push(mem); return; }
     if (mem.enabled === false) return;
     const kws = (mem.keywords || []).map(norm);
     if (kws.some(kw => kw && msgNorm.includes(kw))) matched.push(mem);
   });
-
   matched.sort((a, b) => (PRIORITY_ORDER[a.priority || 'media'] || 1) - (PRIORITY_ORDER[b.priority || 'media'] || 1));
   const maxMem = state.maxMemories || 3;
   const remaining = Math.max(0, maxMem - pinned.length);
@@ -1300,9 +1155,7 @@ function getRelevantMemories(userMessage) {
 }
 
 function updateInfoBar(memories, totalTokens) {
-  const bar = document.getElementById('infoBar');
-  const left = document.getElementById('infoBarLeft');
-  const badge = document.getElementById('tokenBadge');
+  const bar = document.getElementById('infoBar'); const left = document.getElementById('infoBarLeft'); const badge = document.getElementById('tokenBadge');
   if (memories.length === 0 && !totalTokens) { bar.classList.remove('visible'); return; }
   bar.classList.add('visible');
   let html = '';
@@ -1313,10 +1166,8 @@ function updateInfoBar(memories, totalTokens) {
     }).join('');
   }
   left.innerHTML = html;
-  if (totalTokens) {
-    badge.textContent = `~${tokenLabel(totalTokens)} tokens`;
-    badge.className = 'token-badge ' + tokenClass(totalTokens);
-  } else { badge.textContent = ''; }
+  if (totalTokens) { badge.textContent = `~${tokenLabel(totalTokens)} tokens`; badge.className = 'token-badge ' + tokenClass(totalTokens); }
+  else { badge.textContent = ''; }
 }
 
 // ===== SUMMARIZE =====
@@ -1335,16 +1186,14 @@ async function summarizeOlderMessages(chat) {
   const msgs = [{ role: 'system', content: summaryPrompt }, ...oldMessages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '[mensagem com imagem]' }))];
   try {
     const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}`, 'HTTP-Referer': 'https://bb-chat.app', 'X-Title': 'BB Chat Summary' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}`, 'HTTP-Referer': 'https://bb-chat.app', 'X-Title': 'BB Chat Summary' },
       body: JSON.stringify({ model: chat.model || DEFAULT_MODELS[0].id, messages: msgs, temperature: 0.3, max_tokens: 800, provider: { allow_fallbacks: false } }),
     });
     if (!resp.ok) return;
     const data = await resp.json();
     const summary = data.choices?.[0]?.message?.content;
     if (!summary || summary.length < 50) return;
-    chat.summary = summary;
-    chat.messages = chat.messages.slice(toSummarize);
+    chat.summary = summary; chat.messages = chat.messages.slice(toSummarize);
     if (chat.messages.length === 0) { chat.messages = backupMessages; return; }
     chat.updatedAt = Date.now(); saveState();
     showToast(`Contexto comprimido: ${toSummarize} msgs → resumo`, false);
@@ -1352,10 +1201,7 @@ async function summarizeOlderMessages(chat) {
 }
 
 // ===== BUILD API MESSAGES =====
-function getModelDisplayName(modelId) {
-  const found = getAllModels().find(m => m.id === modelId);
-  return found ? found.name : modelId.split('/').pop();
-}
+function getModelDisplayName(modelId) { const found = getAllModels().find(m => m.id === modelId); return found ? found.name : modelId.split('/').pop(); }
 
 function buildApiMessages(chat, userContent) {
   const messages = [];
@@ -1364,9 +1210,10 @@ function buildApiMessages(chat, userContent) {
   const systemContent = state.systemPrompt ? `${identityLine}\n\n${state.systemPrompt}` : identityLine;
   messages.push({ role: 'system', content: systemContent });
 
-  if (chat.summary) {
-    messages.push({ role: 'system', content: `[RESUMO DA CONVERSA ANTERIOR]\n\n${chat.summary}` });
-  }
+  // === TEMPORAL AWARENESS (NEW) ===
+  messages.push({ role: 'system', content: buildTemporalContext(chat) });
+
+  if (chat.summary) { messages.push({ role: 'system', content: `[RESUMO DA CONVERSA ANTERIOR]\n\n${chat.summary}` }); }
 
   const userText = typeof userContent === 'string' ? userContent : (userContent.find(c => c.type === 'text')?.text || '');
   const mems = getRelevantMemories(userText);
@@ -1399,42 +1246,27 @@ function buildApiParams() {
 
 // ===== IMAGE HANDLING =====
 function handleImageAttach(event) {
-  const files = event.target.files;
-  if (!files.length) return;
+  const files = event.target.files; if (!files.length) return;
   Array.from(files).forEach(file => {
-    if (file.size > 5 * 1024 * 1024) {
-      showToast(`${file.name} é demasiado grande (máx 5MB)`);
-      return;
-    }
+    if (file.size > 5 * 1024 * 1024) { showToast(`${file.name} é demasiado grande (máx 5MB)`); return; }
     const reader = new FileReader();
     reader.onload = (e) => {
-      const base64 = e.target.result.split(',')[1];
-      const mimeType = file.type || 'image/jpeg';
+      const base64 = e.target.result.split(',')[1]; const mimeType = file.type || 'image/jpeg';
       pendingImages.push({ base64, mimeType, name: file.name, dataUrl: e.target.result });
       renderImagePreviews();
     };
     reader.readAsDataURL(file);
   });
-  event.target.value = '';
-  updateSendBtn();
+  event.target.value = ''; updateSendBtn();
 }
 
 function renderImagePreviews() {
-  const row = document.getElementById('imagePreviewRow');
-  row.innerHTML = '';
+  const row = document.getElementById('imagePreviewRow'); row.innerHTML = '';
   pendingImages.forEach((img, i) => {
-    row.innerHTML += `<div class="image-preview-thumb">
-      <img src="${img.dataUrl}" alt="${escapeHtml(img.name)}">
-      <button class="image-preview-remove" onclick="removePendingImage(${i})">✕</button>
-    </div>`;
+    row.innerHTML += `<div class="image-preview-thumb"><img src="${img.dataUrl}" alt="${escapeHtml(img.name)}"><button class="image-preview-remove" onclick="removePendingImage(${i})">✕</button></div>`;
   });
 }
-
-function removePendingImage(i) {
-  pendingImages.splice(i, 1);
-  renderImagePreviews();
-  updateSendBtn();
-}
+function removePendingImage(i) { pendingImages.splice(i, 1); renderImagePreviews(); updateSendBtn(); }
 
 // ===== SEND MESSAGE =====
 async function sendMessage() {
@@ -1446,34 +1278,27 @@ async function sendMessage() {
   const chat = getActiveChat();
   chat.model = document.getElementById('modelSelect').value;
 
-  // Build user content (text + images)
   let userContent;
   if (pendingImages.length > 0) {
     userContent = [];
-    pendingImages.forEach(img => {
-      userContent.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
-    });
+    pendingImages.forEach(img => { userContent.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } }); });
     if (text) userContent.push({ type: 'text', text });
-  } else {
-    userContent = text;
-  }
+  } else { userContent = text; }
 
-  chat.messages.push({ role: 'user', content: userContent });
+  // === TIMESTAMP ADDED (NEW) ===
+  chat.messages.push({ role: 'user', content: userContent, timestamp: Date.now() });
   chat.updatedAt = Date.now();
   if (!chat.title) chat.title = (text || 'Imagem').slice(0, 60);
 
   const sentImages = [...pendingImages];
-  pendingImages = [];
-  document.getElementById('imagePreviewRow').innerHTML = '';
-
+  pendingImages = []; document.getElementById('imagePreviewRow').innerHTML = '';
   saveState(); renderMessages(); renderChatList();
   input.value = ''; autoResize(input); updateSendBtn();
 
   const area = document.getElementById('chatArea');
   const typ = document.createElement('div');
   typ.className = 'message assistant'; typ.id = 'typing';
-  typ.innerHTML = `<div class="message-label">${escapeHtml(state.aiLabel || 'AL')}</div>
-    <div class="message-bubble"><div class="typing-indicator"><span></span><span></span><span></span></div></div>`;
+  typ.innerHTML = `<div class="message-label">${escapeHtml(state.aiLabel || 'AL')}</div><div class="message-bubble"><div class="typing-indicator"><span></span><span></span><span></span></div></div>`;
   area.appendChild(typ); scrollToBottom();
 
   state.isStreaming = true; updateSendBtn();
@@ -1490,10 +1315,7 @@ async function sendMessage() {
       signal: abortController.signal,
     });
 
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.error?.message || `Erro ${resp.status}`);
-    }
+    if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.error?.message || `Erro ${resp.status}`); }
 
     document.getElementById('typing')?.remove();
     const msgEl = document.createElement('div');
@@ -1504,130 +1326,89 @@ async function sendMessage() {
     const modelBadge = msgEl.querySelector('.model-badge');
 
     let full = '', realModel = '';
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
+    const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
 
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const { done, value } = await reader.read(); if (done) break;
       buf += dec.decode(value, { stream: true });
       const lines = buf.split('\n'); buf = lines.pop() || '';
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
-        const d = line.slice(6).trim();
-        if (d === '[DONE]') continue;
+        const d = line.slice(6).trim(); if (d === '[DONE]') continue;
         try {
           const parsed = JSON.parse(d);
-          if (parsed.model && !realModel) {
-            realModel = parsed.model;
-            modelBadge.textContent = `✓ ${getModelDisplayName(realModel) || realModel.split('/').pop()}`;
-          }
+          if (parsed.model && !realModel) { realModel = parsed.model; modelBadge.textContent = `✓ ${getModelDisplayName(realModel) || realModel.split('/').pop()}`; }
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) { full += delta; bubble.innerHTML = formatMarkdown(full); scrollToBottom(); }
         } catch(e) {}
       }
     }
 
-    chat.messages.push({ role: 'assistant', content: full, model: realModel || chat.model });
+    // === TIMESTAMP ADDED (NEW) ===
+    chat.messages.push({ role: 'assistant', content: full, model: realModel || chat.model, timestamp: Date.now() });
     chat.updatedAt = Date.now(); saveState(); renderChatList();
-
-    // Re-render to get action buttons
     renderMessages();
 
   } catch(err) {
     document.getElementById('typing')?.remove();
-    if (err.name !== 'AbortError') {
-      showToast(err.message || 'Erro na ligação');
-      console.error('API Error:', err);
-    }
-  } finally {
-    state.isStreaming = false; abortController = null; updateSendBtn();
-  }
+    if (err.name !== 'AbortError') { showToast(err.message || 'Erro na ligação'); console.error('API Error:', err); }
+  } finally { state.isStreaming = false; abortController = null; updateSendBtn(); }
 }
 
-function stopStreaming() {
-  if (abortController) { abortController.abort(); showToast('Streaming parado', false); }
-}
+function stopStreaming() { if (abortController) { abortController.abort(); showToast('Streaming parado', false); } }
 
 // ===== RENDER MESSAGES =====
 function renderMessages() {
-  const area = document.getElementById('chatArea');
-  const chat = getActiveChat();
+  const area = document.getElementById('chatArea'); const chat = getActiveChat();
   updateInfoBar([], null);
-
   if (!chat || chat.messages.length === 0) {
     const avatarHtml = state.welcomeAvatar ? `<img class="welcome-avatar" src="${state.welcomeAvatar}" alt="Avatar">` : '';
-    const syncHtml = currentUser ? '<div class="sync-status online">☁️ Sincronizado</div>' :
-      (isOfflineMode ? '<div class="sync-status offline">📱 Modo offline</div>' : '');
+    const syncHtml = currentUser ? '<div class="sync-status online">☁️ Sincronizado</div>' : (isOfflineMode ? '<div class="sync-status offline">📱 Modo offline</div>' : '');
     area.innerHTML = `<div class="welcome">${avatarHtml}<div class="welcome-logo">BB</div><div class="welcome-sub">O teu chat pessoal.<br>Escolhe o modelo, escreve, e bora.</div>${syncHtml}</div>`;
     return;
   }
   area.innerHTML = '';
-
   if (chat.summary) {
-    const sumEl = document.createElement('div');
-    sumEl.className = 'message system-summary';
+    const sumEl = document.createElement('div'); sumEl.className = 'message system-summary';
     sumEl.innerHTML = `<div class="message-bubble summary-bubble">📋 Contexto comprimido (${estimateTokens(chat.summary)} tokens)</div>`;
     area.appendChild(sumEl);
   }
-
   chat.messages.forEach((msg, idx) => area.appendChild(createMessageEl(msg.role, msg.content, msg, idx)));
   scrollToBottom();
 }
 
 function createMessageEl(role, content, msgData, msgIdx) {
-  const div = document.createElement('div');
-  div.className = `message ${role}`;
+  const div = document.createElement('div'); div.className = `message ${role}`;
   const label = role === 'user' ? (state.userLabel || 'Tu') : (state.aiLabel || 'AL');
-
   let bubbleContent = '';
-  if (typeof content === 'string') {
-    bubbleContent = role === 'assistant' ? formatMarkdown(content) : escapeHtml(content);
-  } else if (Array.isArray(content)) {
+  if (typeof content === 'string') { bubbleContent = role === 'assistant' ? formatMarkdown(content) : escapeHtml(content); }
+  else if (Array.isArray(content)) {
     content.forEach(block => {
-      if (block.type === 'text') {
-        bubbleContent += role === 'assistant' ? formatMarkdown(block.text) : escapeHtml(block.text);
-      } else if (block.type === 'image_url') {
-        bubbleContent += `<img class="chat-image" src="${block.image_url.url}" alt="Imagem">`;
-      }
+      if (block.type === 'text') { bubbleContent += role === 'assistant' ? formatMarkdown(block.text) : escapeHtml(block.text); }
+      else if (block.type === 'image_url') { bubbleContent += `<img class="chat-image" src="${block.image_url.url}" alt="Imagem">`; }
     });
   }
-
   let badgeHtml = '';
-  if (role === 'assistant' && msgData?.model) {
-    badgeHtml = `<div class="model-badge" style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-muted);padding:2px 4px;margin-top:2px;opacity:0.7;">✓ ${escapeHtml(getModelDisplayName(msgData.model))}</div>`;
-  }
-
-  const textContent = typeof content === 'string' ? content : content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-
-  let actionsHtml = `<div class="message-actions">
-    <button class="msg-action-btn" onclick="copyMessage(this, ${msgIdx})" title="Copiar">📋 <span>Copiar</span></button>`;
-  if (role === 'assistant') {
-    actionsHtml += `<button class="msg-action-btn" onclick="saveAsMemory(${msgIdx})" title="Guardar como memória">🧠 <span>Memória</span></button>`;
-  }
+  if (role === 'assistant' && msgData?.model) { badgeHtml = `<div class="model-badge" style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-muted);padding:2px 4px;margin-top:2px;opacity:0.7;">✓ ${escapeHtml(getModelDisplayName(msgData.model))}</div>`; }
+  let actionsHtml = `<div class="message-actions"><button class="msg-action-btn" onclick="copyMessage(this, ${msgIdx})" title="Copiar">📋 <span>Copiar</span></button>`;
+  if (role === 'assistant') { actionsHtml += `<button class="msg-action-btn" onclick="saveAsMemory(${msgIdx})" title="Guardar como memória">🧠 <span>Memória</span></button>`; }
   actionsHtml += '</div>';
-
-  div.innerHTML = `<div class="message-label">${escapeHtml(label)}</div>
-    <div class="message-bubble">${bubbleContent}</div>${badgeHtml}${actionsHtml}`;
+  div.innerHTML = `<div class="message-label">${escapeHtml(label)}</div><div class="message-bubble">${bubbleContent}</div>${badgeHtml}${actionsHtml}`;
   return div;
 }
 
 function copyMessage(btn, idx) {
-  const chat = getActiveChat();
-  if (!chat) return;
+  const chat = getActiveChat(); if (!chat) return;
   const msg = chat.messages[idx];
   const text = typeof msg.content === 'string' ? msg.content : msg.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
   navigator.clipboard.writeText(text).then(() => {
-    btn.classList.add('copied');
-    btn.querySelector('span').textContent = 'Copiado!';
+    btn.classList.add('copied'); btn.querySelector('span').textContent = 'Copiado!';
     setTimeout(() => { btn.classList.remove('copied'); btn.querySelector('span').textContent = 'Copiar'; }, 2000);
   });
 }
 
 function saveAsMemory(idx) {
-  const chat = getActiveChat();
-  if (!chat) return;
+  const chat = getActiveChat(); if (!chat) return;
   const msg = chat.messages[idx];
   const text = typeof msg.content === 'string' ? msg.content : msg.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
   openMemoryEditor(null);
@@ -1635,19 +1416,13 @@ function saveAsMemory(idx) {
   document.getElementById('memContentTokens').textContent = `~${estimateTokens(text)} tokens estimados`;
 }
 
-function scrollToBottom() {
-  const a = document.getElementById('chatArea');
-  requestAnimationFrame(() => { a.scrollTop = a.scrollHeight; });
-}
+function scrollToBottom() { const a = document.getElementById('chatArea'); requestAnimationFrame(() => { a.scrollTop = a.scrollHeight; }); }
 
 // ===== EXPORT CHAT =====
-function toggleExportMenu() {
-  document.getElementById('exportMenu').classList.toggle('visible');
-}
+function toggleExportMenu() { document.getElementById('exportMenu').classList.toggle('visible'); }
 
 function exportChatMarkdown() {
-  const chat = getActiveChat();
-  if (!chat) { showToast('Nenhum chat activo'); return; }
+  const chat = getActiveChat(); if (!chat) { showToast('Nenhum chat activo'); return; }
   let md = `# ${chat.title || 'Chat'}\n\nModelo: ${chat.model}\nData: ${new Date(chat.createdAt).toLocaleString('pt-PT')}\n\n---\n\n`;
   chat.messages.forEach(m => {
     const label = m.role === 'user' ? (state.userLabel || 'Tu') : (state.aiLabel || 'AL');
@@ -1660,8 +1435,7 @@ function exportChatMarkdown() {
 }
 
 function exportChatJSON() {
-  const chat = getActiveChat();
-  if (!chat) { showToast('Nenhum chat activo'); return; }
+  const chat = getActiveChat(); if (!chat) { showToast('Nenhum chat activo'); return; }
   const data = { ...chat, exportDate: new Date().toISOString() };
   triggerDownload(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), `${(chat.title || 'chat').replace(/[^a-zA-Z0-9]/g, '_')}.json`);
   document.getElementById('exportMenu').classList.remove('visible');
@@ -1671,24 +1445,14 @@ function exportChatJSON() {
 // ===== INPUT =====
 const inputField = document.getElementById('inputField');
 inputField.addEventListener('input', () => { autoResize(inputField); updateSendBtn(); updateInputTokenHint(); });
-
 function autoResize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 150) + 'px'; }
-
 function updateSendBtn() {
-  const sending = state.isStreaming;
-  const hasContent = inputField.value.trim() || pendingImages.length > 0;
+  const sending = state.isStreaming; const hasContent = inputField.value.trim() || pendingImages.length > 0;
   document.getElementById('sendBtn').disabled = !hasContent || sending;
   document.getElementById('sendBtn').style.display = sending ? 'none' : 'flex';
   document.getElementById('stopBtn').classList.toggle('visible', sending);
 }
-
-function updateInputTokenHint() {
-  const hint = document.getElementById('inputTokenHint');
-  const text = inputField.value.trim();
-  if (!text) { hint.textContent = ''; return; }
-  hint.textContent = `~${estimateTokens(text)} tokens`;
-}
-
+function updateInputTokenHint() { const hint = document.getElementById('inputTokenHint'); const text = inputField.value.trim(); if (!text) { hint.textContent = ''; return; } hint.textContent = `~${estimateTokens(text)} tokens`; }
 function handleKey(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
 
 // ===== MARKDOWN =====
@@ -1706,23 +1470,15 @@ function formatMarkdown(text) {
   h = h.replace(/\n/g, '<br>');
   return '<p>' + h + '</p>';
 }
-
 function escapeHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
 
 // ===== SIDEBAR =====
-function toggleSidebar() {
-  document.getElementById('sidebar').classList.toggle('open');
-  document.getElementById('sidebarOverlay').classList.toggle('visible');
-}
-function closeSidebar() {
-  document.getElementById('sidebar').classList.remove('open');
-  document.getElementById('sidebarOverlay').classList.remove('visible');
-}
+function toggleSidebar() { document.getElementById('sidebar').classList.toggle('open'); document.getElementById('sidebarOverlay').classList.toggle('visible'); }
+function closeSidebar() { document.getElementById('sidebar').classList.remove('open'); document.getElementById('sidebarOverlay').classList.remove('visible'); }
 
 // ===== SETTINGS =====
 function openSettings() {
-  closeSidebar();
-  updateAvatarPreview();
+  closeSidebar(); updateAvatarPreview();
   document.getElementById('apiKeyInput').value = state.apiKey;
   document.getElementById('supabaseUrlInput').value = localStorage.getItem('bb_supabase_url') || '';
   document.getElementById('supabaseKeyInput').value = localStorage.getItem('bb_supabase_key') || '';
@@ -1742,28 +1498,18 @@ function openSettings() {
   setSlider('paramRepP', 'valRepP', state.params.repetition_penalty);
   setSlider('paramMinP', 'valMinP', state.params.min_p);
   setSlider('paramMaxTok', 'valMaxTok', state.params.max_tokens, true);
-  updateSystemPromptTokens();
-  renderCustomModels();
+  updateSystemPromptTokens(); renderCustomModels();
   document.getElementById('settingsModal').classList.add('open');
 }
 function closeSettings() { document.getElementById('settingsModal').classList.remove('open'); }
 
-function setSlider(sid, vid, val, isInt) {
-  const s = document.getElementById(sid), v = document.getElementById(vid);
-  if (!s || !v) return;
-  s.value = val;
-  v.textContent = isInt ? Math.round(val) : parseFloat(val).toFixed(2);
-}
+function setSlider(sid, vid, val, isInt) { const s = document.getElementById(sid), v = document.getElementById(vid); if (!s || !v) return; s.value = val; v.textContent = isInt ? Math.round(val) : parseFloat(val).toFixed(2); }
 
-function updateSystemPromptTokens() {
-  const t = document.getElementById('systemPromptInput').value;
-  document.getElementById('systemPromptTokens').textContent = t ? `~${estimateTokens(t)} tokens estimados` : '';
-}
+function updateSystemPromptTokens() { const t = document.getElementById('systemPromptInput').value; document.getElementById('systemPromptTokens').textContent = t ? `~${estimateTokens(t)} tokens estimados` : ''; }
 
 document.querySelectorAll('.slider-row input[type="range"]').forEach(s => {
   s.addEventListener('input', () => {
-    const v = s.parentElement.querySelector('.slider-val');
-    if (!v) return;
+    const v = s.parentElement.querySelector('.slider-val'); if (!v) return;
     if (s.id === 'contextSlider' || s.id === 'maxMemSlider') { v.textContent = Math.round(s.value); return; }
     if (s.id === 'summarizeSlider') { v.textContent = parseInt(s.value) === 0 ? 'OFF' : Math.round(s.value); return; }
     if (s.id === 'paramTopK' || s.id === 'paramMaxTok') { v.textContent = Math.round(s.value); return; }
@@ -1781,17 +1527,11 @@ function renderCustomModels() {
   const list = document.getElementById('customModelsList'); list.innerHTML = '';
   state.customModels.forEach((m, i) => {
     const row = document.createElement('div'); row.className = 'custom-model-row';
-    row.innerHTML = `<input type="text" value="${escapeHtml(m)}" placeholder="provider/model" data-index="${i}">
-      <button class="remove-btn" onclick="removeCustomModel(${i})">✕</button>`;
+    row.innerHTML = `<input type="text" value="${escapeHtml(m)}" placeholder="provider/model" data-index="${i}"><button class="remove-btn" onclick="removeCustomModel(${i})">✕</button>`;
     list.appendChild(row);
   });
 }
-
-function addCustomModelRow() {
-  state.customModels.push(''); renderCustomModels();
-  const inputs = document.querySelectorAll('#customModelsList input');
-  if (inputs.length) inputs[inputs.length - 1].focus();
-}
+function addCustomModelRow() { state.customModels.push(''); renderCustomModels(); const inputs = document.querySelectorAll('#customModelsList input'); if (inputs.length) inputs[inputs.length - 1].focus(); }
 function removeCustomModel(i) { state.customModels.splice(i, 1); renderCustomModels(); }
 
 function saveSettings() {
@@ -1803,14 +1543,10 @@ function saveSettings() {
   state.maxMemories = parseInt(document.getElementById('maxMemSlider').value) || 3;
   state.summarizeAfter = parseInt(document.getElementById('summarizeSlider').value) || 0;
   state.params = {
-    temperature: parseFloat(document.getElementById('paramTemp').value),
-    top_p: parseFloat(document.getElementById('paramTopP').value),
-    top_k: parseInt(document.getElementById('paramTopK').value),
-    frequency_penalty: parseFloat(document.getElementById('paramFreqP').value),
-    presence_penalty: parseFloat(document.getElementById('paramPresP').value),
-    repetition_penalty: parseFloat(document.getElementById('paramRepP').value),
-    min_p: parseFloat(document.getElementById('paramMinP').value),
-    max_tokens: parseInt(document.getElementById('paramMaxTok').value),
+    temperature: parseFloat(document.getElementById('paramTemp').value), top_p: parseFloat(document.getElementById('paramTopP').value),
+    top_k: parseInt(document.getElementById('paramTopK').value), frequency_penalty: parseFloat(document.getElementById('paramFreqP').value),
+    presence_penalty: parseFloat(document.getElementById('paramPresP').value), repetition_penalty: parseFloat(document.getElementById('paramRepP').value),
+    min_p: parseFloat(document.getElementById('paramMinP').value), max_tokens: parseInt(document.getElementById('paramMaxTok').value),
   };
   state.customModels = [...document.querySelectorAll('#customModelsList input')].map(i => i.value.trim()).filter(v => v);
   saveState(); renderModelSelect(); renderMessages(); closeSettings();
@@ -1821,19 +1557,11 @@ function toggleApiVis() { const i = document.getElementById('apiKeyInput'); i.ty
 function toggleSupabaseKeyVis() { const i = document.getElementById('supabaseKeyInput'); i.type = i.type === 'password' ? 'text' : 'password'; }
 
 async function saveSupabaseConfig() {
-  const url = document.getElementById('supabaseUrlInput').value.trim();
-  const key = document.getElementById('supabaseKeyInput').value.trim();
+  const url = document.getElementById('supabaseUrlInput').value.trim(); const key = document.getElementById('supabaseKeyInput').value.trim();
   if (!url || !key) { showToast('Preenche URL e Key do Supabase'); return; }
-  localStorage.setItem('bb_supabase_url', url);
-  localStorage.setItem('bb_supabase_key', key);
-  // Re-init Supabase
-  try {
-    const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
-    supabase = createClient(url, key);
-    showToast('Supabase configurado ✓ — Refresca a página para activar login', false);
-  } catch(e) {
-    showToast('Erro ao conectar: ' + e.message);
-  }
+  localStorage.setItem('bb_supabase_url', url); localStorage.setItem('bb_supabase_key', key);
+  try { const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'); supabase = createClient(url, key); showToast('Supabase configurado ✓ — Refresca a página para activar login', false); }
+  catch(e) { showToast('Erro ao conectar: ' + e.message); }
 }
 
 // ===== AVATAR =====
@@ -1844,8 +1572,7 @@ function handleAvatarUpload(event) {
   reader.onload = (e) => {
     const img = new Image();
     img.onload = () => {
-      const canvas = document.createElement('canvas');
-      const maxSize = 200;
+      const canvas = document.createElement('canvas'); const maxSize = 200;
       let w = img.width, h = img.height;
       if (w > h) { h = Math.round(h * maxSize / w); w = maxSize; } else { w = Math.round(w * maxSize / h); h = maxSize; }
       canvas.width = w; canvas.height = h;
@@ -1858,25 +1585,13 @@ function handleAvatarUpload(event) {
   };
   reader.readAsDataURL(file); event.target.value = '';
 }
-
-function removeAvatar() {
-  state.welcomeAvatar = ''; updateAvatarPreview(); saveState(); renderMessages();
-  showToast('Avatar removido', false);
-}
-
+function removeAvatar() { state.welcomeAvatar = ''; updateAvatarPreview(); saveState(); renderMessages(); showToast('Avatar removido', false); }
 function updateAvatarPreview() {
   const preview = document.getElementById('avatarPreview');
-  if (state.welcomeAvatar) {
-    preview.innerHTML = `<img src="${state.welcomeAvatar}" style="width:100%;height:100%;object-fit:cover;">`;
-  } else {
-    preview.innerHTML = '<span style="color:var(--text-muted);font-size:24px;">+</span>';
-  }
+  if (state.welcomeAvatar) { preview.innerHTML = `<img src="${state.welcomeAvatar}" style="width:100%;height:100%;object-fit:cover;">`; }
+  else { preview.innerHTML = '<span style="color:var(--text-muted);font-size:24px;">+</span>'; }
 }
-
-function toggleSection(id, el) {
-  document.getElementById(id).classList.toggle('collapsed');
-  el.querySelector('.toggle-arrow').classList.toggle('collapsed');
-}
+function toggleSection(id, el) { document.getElementById(id).classList.toggle('collapsed'); el.querySelector('.toggle-arrow').classList.toggle('collapsed'); }
 
 // ===== MEMORIES UI =====
 function openMemories() { closeSidebar(); renderMemoryCards(); document.getElementById('memoryModal').classList.add('open'); }
@@ -1884,13 +1599,9 @@ function closeMemories() { document.getElementById('memoryModal').classList.remo
 
 function renderMemoryCards() {
   const list = document.getElementById('memoryCardsList'); list.innerHTML = '';
-  if (!state.memories.length) {
-    list.innerHTML = '<div class="hint" style="text-align:center;padding:20px;">Nenhuma memória criada.</div>';
-    return;
-  }
+  if (!state.memories.length) { list.innerHTML = '<div class="hint" style="text-align:center;padding:20px;">Nenhuma memória criada.</div>'; return; }
   const sorted = [...state.memories].sort((a, b) => {
-    if (a.pinned && !b.pinned) return -1;
-    if (!a.pinned && b.pinned) return 1;
+    if (a.pinned && !b.pinned) return -1; if (!a.pinned && b.pinned) return 1;
     return (PRIORITY_ORDER[a.priority || 'media'] || 1) - (PRIORITY_ORDER[b.priority || 'media'] || 1);
   });
   sorted.forEach(mem => {
@@ -1900,16 +1611,7 @@ function renderMemoryCards() {
     const icon = mem.pinned ? '📌' : (mem.enabled !== false ? '✅' : '⏸️');
     const pr = mem.priority || 'media';
     const prLabel = pr === 'alta' ? 'ALTA' : pr === 'baixa' ? 'BAIXA' : 'MÉDIA';
-    card.innerHTML = `
-      <div class="memory-card-header">
-        <span class="memory-card-name">${icon} ${escapeHtml(mem.name)}<span class="priority-badge ${pr}">${prLabel}</span></span>
-        <div class="memory-card-actions">
-          <button onclick="openMemoryEditor('${mem.id}')" title="Editar">✏️</button>
-          <button class="del" onclick="deleteMemory('${mem.id}')" title="Apagar">🗑️</button>
-        </div>
-      </div>
-      <div class="memory-card-keywords">${(mem.keywords || []).map(k => `<span>${escapeHtml(k)}</span>`).join('')}</div>
-      <div class="memory-card-meta" style="margin-top:6px;">${kb} KB · ~${tok} tokens · ${(mem.keywords || []).length} keywords${mem.pinned ? ' · Fixada' : ''}</div>`;
+    card.innerHTML = `<div class="memory-card-header"><span class="memory-card-name">${icon} ${escapeHtml(mem.name)}<span class="priority-badge ${pr}">${prLabel}</span></span><div class="memory-card-actions"><button onclick="openMemoryEditor('${mem.id}')" title="Editar">✏️</button><button class="del" onclick="deleteMemory('${mem.id}')" title="Apagar">🗑️</button></div></div><div class="memory-card-keywords">${(mem.keywords || []).map(k => `<span>${escapeHtml(k)}</span>`).join('')}</div><div class="memory-card-meta" style="margin-top:6px;">${kb} KB · ~${tok} tokens · ${(mem.keywords || []).length} keywords${mem.pinned ? ' · Fixada' : ''}</div>`;
     list.appendChild(card);
   });
 }
@@ -1926,8 +1628,7 @@ function openMemoryEditor(memId) {
     document.getElementById('memPinned').checked = false;
     document.getElementById('memContentTokens').textContent = '';
   } else {
-    const m = state.memories.find(x => x.id === memId);
-    if (!m) return;
+    const m = state.memories.find(x => x.id === memId); if (!m) return;
     document.getElementById('memNameInput').value = m.name || '';
     document.getElementById('memPriorityInput').value = m.priority || 'media';
     document.getElementById('memKeywordsInput').value = (m.keywords || []).join(', ');
@@ -1938,27 +1639,20 @@ function openMemoryEditor(memId) {
   }
   document.getElementById('memoryEditorModal').classList.add('open');
 }
-
 function closeMemoryEditor() { document.getElementById('memoryEditorModal').classList.remove('open'); editingMemoryId = null; }
 
 function saveMemory() {
   const name = document.getElementById('memNameInput').value.trim();
   if (!name) { showToast('Dá um nome à memória'); return; }
   const data = {
-    name,
-    priority: document.getElementById('memPriorityInput').value || 'media',
+    name, priority: document.getElementById('memPriorityInput').value || 'media',
     keywords: document.getElementById('memKeywordsInput').value.split(',').map(k => k.trim().toLowerCase()).filter(k => k),
     content: document.getElementById('memContentInput').value,
     enabled: document.getElementById('memAlwaysLoad').checked,
-    pinned: document.getElementById('memPinned').checked,
-    updatedAt: Date.now(),
+    pinned: document.getElementById('memPinned').checked, updatedAt: Date.now(),
   };
-  if (editingMemoryId) {
-    const m = state.memories.find(x => x.id === editingMemoryId);
-    if (m) Object.assign(m, data);
-  } else {
-    state.memories.push({ id: 'mem_' + Date.now(), ...data, createdAt: Date.now() });
-  }
+  if (editingMemoryId) { const m = state.memories.find(x => x.id === editingMemoryId); if (m) Object.assign(m, data); }
+  else { state.memories.push({ id: 'mem_' + Date.now(), ...data, createdAt: Date.now() }); }
   saveState(); closeMemoryEditor(); renderMemoryCards();
   showToast('Memória guardada ✓', false);
 }
@@ -1973,29 +1667,13 @@ function deleteMemory(id) {
 
 // ===== EXPORT / IMPORT =====
 function buildExportData() {
-  return {
-    exportDate: new Date().toISOString(), version: 6,
-    apiKey: state.apiKey, systemPrompt: state.systemPrompt,
-    userLabel: state.userLabel, aiLabel: state.aiLabel,
-    contextMessages: state.contextMessages, maxMemories: state.maxMemories,
-    summarizeAfter: state.summarizeAfter, welcomeAvatar: state.welcomeAvatar,
-    params: state.params, customModels: state.customModels,
-    memories: state.memories, chats: state.chats,
-  };
+  return { exportDate: new Date().toISOString(), version: 6, apiKey: state.apiKey, systemPrompt: state.systemPrompt,
+    userLabel: state.userLabel, aiLabel: state.aiLabel, contextMessages: state.contextMessages, maxMemories: state.maxMemories,
+    summarizeAfter: state.summarizeAfter, welcomeAvatar: state.welcomeAvatar, params: state.params, customModels: state.customModels,
+    memories: state.memories, chats: state.chats };
 }
-
-function triggerDownload(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-function exportAll() {
-  const blob = new Blob([JSON.stringify(buildExportData(), null, 2)], { type: 'application/json' });
-  triggerDownload(blob, `bb_chat_v6_${new Date().toISOString().slice(0, 10)}.json`);
-  showToast('Backup exportado ✓', false);
-}
+function triggerDownload(blob, filename) { const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); }
+function exportAll() { const blob = new Blob([JSON.stringify(buildExportData(), null, 2)], { type: 'application/json' }); triggerDownload(blob, `bb_chat_v6_${new Date().toISOString().slice(0, 10)}.json`); showToast('Backup exportado ✓', false); }
 
 function importAll(event) {
   const file = event.target.files[0]; if (!file) return;
@@ -2004,8 +1682,7 @@ function importAll(event) {
     try {
       const d = JSON.parse(e.target.result);
       if (!confirm(`Importar backup de ${d.exportDate || '?'}?\nSubstitui tudo.`)) return;
-      ['apiKey', 'systemPrompt', 'userLabel', 'aiLabel', 'contextMessages', 'maxMemories',
-        'summarizeAfter', 'welcomeAvatar', 'customModels', 'memories', 'chats'].forEach(k => { if (d[k] !== undefined) state[k] = d[k]; });
+      ['apiKey', 'systemPrompt', 'userLabel', 'aiLabel', 'contextMessages', 'maxMemories', 'summarizeAfter', 'welcomeAvatar', 'customModels', 'memories', 'chats'].forEach(k => { if (d[k] !== undefined) state[k] = d[k]; });
       if (d.params) state.params = { ...state.params, ...d.params };
       if (d.chats?.length) state.activeChatId = d.chats[d.chats.length - 1].id;
       saveState(); renderModelSelect(); renderChatList(); renderMessages();
@@ -2014,13 +1691,7 @@ function importAll(event) {
   };
   reader.readAsText(file); event.target.value = '';
 }
-
-function clearAllData() {
-  if (!confirm('⚠️ APAGAR TUDO?')) return;
-  if (!confirm('Última chance. Tem a certeza?')) return;
-  indexedDB.deleteDatabase(DB_NAME);
-  location.reload();
-}
+function clearAllData() { if (!confirm('⚠️ APAGAR TUDO?')) return; if (!confirm('Última chance. Tem a certeza?')) return; indexedDB.deleteDatabase(DB_NAME); location.reload(); }
 
 // ===== TOAST =====
 function showToast(msg, isError = true) {
@@ -2029,30 +1700,20 @@ function showToast(msg, isError = true) {
   t.classList.add('visible'); setTimeout(() => t.classList.remove('visible'), 3000);
 }
 
-// Close export menu on outside click
 document.addEventListener('click', (e) => {
   const menu = document.getElementById('exportMenu');
-  if (menu.classList.contains('visible') && !e.target.closest('.export-menu') && !e.target.closest('[onclick*="toggleExportMenu"]')) {
-    menu.classList.remove('visible');
-  }
+  if (menu.classList.contains('visible') && !e.target.closest('.export-menu') && !e.target.closest('[onclick*="toggleExportMenu"]')) { menu.classList.remove('visible'); }
 });
 
 // ===== SLIDER SYNC =====
 function syncAllSliders() {
   const pairs = [
-    ['paramTemp', 'valTemp', state.params.temperature, false],
-    ['paramTopP', 'valTopP', state.params.top_p, false],
-    ['paramTopK', 'valTopK', state.params.top_k, true],
-    ['paramFreqP', 'valFreqP', state.params.frequency_penalty, false],
-    ['paramPresP', 'valPresP', state.params.presence_penalty, false],
-    ['paramRepP', 'valRepP', state.params.repetition_penalty, false],
-    ['paramMinP', 'valMinP', state.params.min_p, false],
-    ['paramMaxTok', 'valMaxTok', state.params.max_tokens, true],
+    ['paramTemp', 'valTemp', state.params.temperature, false], ['paramTopP', 'valTopP', state.params.top_p, false],
+    ['paramTopK', 'valTopK', state.params.top_k, true], ['paramFreqP', 'valFreqP', state.params.frequency_penalty, false],
+    ['paramPresP', 'valPresP', state.params.presence_penalty, false], ['paramRepP', 'valRepP', state.params.repetition_penalty, false],
+    ['paramMinP', 'valMinP', state.params.min_p, false], ['paramMaxTok', 'valMaxTok', state.params.max_tokens, true],
   ];
-  pairs.forEach(([sid, vid, val, isInt]) => {
-    const s = document.getElementById(sid), v = document.getElementById(vid);
-    if (s && v) { s.value = val; v.textContent = isInt ? Math.round(val) : parseFloat(val).toFixed(2); }
-  });
+  pairs.forEach(([sid, vid, val, isInt]) => { const s = document.getElementById(sid), v = document.getElementById(vid); if (s && v) { s.value = val; v.textContent = isInt ? Math.round(val) : parseFloat(val).toFixed(2); } });
   const cs = document.getElementById('contextSlider');
   if (cs) { cs.value = state.contextMessages || 8; document.getElementById('contextVal').textContent = state.contextMessages || 8; }
   const ms = document.getElementById('maxMemSlider');
@@ -2063,7 +1724,6 @@ function syncAllSliders() {
 
 // ===== INIT =====
 (async function init() {
-  // Check if Supabase configured and user has session
   if (SUPABASE_URL && SUPABASE_ANON_KEY) {
     try {
       const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
@@ -2073,13 +1733,10 @@ function syncAllSliders() {
         currentUser = session.user;
         document.getElementById('logoutBtn').style.display = 'flex';
         document.getElementById('syncBtn').style.display = 'flex';
-        await loadFromCloud();
-        enterApp();
-        return;
+        await loadFromCloud(); enterApp(); return;
       }
     } catch(e) { console.log('Supabase init error:', e); }
   }
-  // Show login screen (user can choose offline)
   document.getElementById('loginScreen').classList.remove('hidden');
 })();
 </script>
